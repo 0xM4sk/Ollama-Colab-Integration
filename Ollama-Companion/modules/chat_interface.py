@@ -5,7 +5,7 @@ import base64
 import requests
 import json
 import time
-from shared import shared
+import shared
 
 
 # Importing necessary functions from model_selector.py
@@ -26,7 +26,20 @@ def images_to_base64(images):
             encoded_images.append(base64_encoded)
     return encoded_images
 
+@st.experimental_singleton
+def get_models(base_url):
+    try:
+        response = requests.get(f"{base_url}/api/tags")
+        response.raise_for_status()  # This will raise an exception for HTTP errors
+        json_data = response.json()
+        return [model['name'] for model in json_data.get('models', [])]
+    except Exception as e:
+        st.error(f"Failed to fetch models: {str(e)}")
+        return []
 
+# In the sidebar initialization
+if 'model_names' not in st.session_state:
+    st.session_state['model_names'] = get_models(base_url)
 
 # Here we create the request for a chat completion at /api/generate
 def stream_response(prompt, base_url, model_name, encoded_images=None):
@@ -61,41 +74,48 @@ def show_chat_interface():
 
     # Sidebar dropdown for Chat Options
     with st.sidebar:
-        chat_option = st.selectbox("Chat Options", ["Standard Chat", "Slow Typing Mode", "Fast Typing Mode"])
-        # Fetch models for model selection
-        if 'model_names' not in st.session_state:
-            st.session_state['model_names'] = []
-        fetch_button = st.button('Fetch Models')
-        if fetch_button:
-            json_data = get_json(f"{base_url}/api/tags")
-            if isinstance(json_data, dict) and 'models' in json_data:
-                st.session_state['model_names'] = [model['name'] for model in json_data['models']]
-            else:
-                st.error("Invalid JSON structure or error in fetching data")
-        # Model selection dropdown
-        selected_model = st.selectbox("Select a Model", st.session_state['model_names'])
-        # Image Uploader
         uploaded_images = st.file_uploader("Upload Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         encoded_images = images_to_base64(uploaded_images)
-        if encoded_images:
-            for uploaded_image in uploaded_images:
-                st.image(uploaded_image, caption="Uploaded Image")
-    if "messages" not in st.session_state:
+        selected_model = st.selectbox("Select a Model", st.session_state['model_names'])
+        chat_type = st.selectbox("Type of Chat", ["Generate completion", "Start a Conversation"])
+
+    if st.button('Clear Chat History'):
         st.session_state.messages = []
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Display previous messages
+for message in st.session_state.get('messages', []):
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    if prompt := st.chat_input("What is up?"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# Chat input field
+if prompt := st.chat_input("What is up?"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    if chat_type == "Generate completion":
+        with st.chat_message("assistant"):
+            with st.spinner('Processing...'):
+                response = stream_response(prompt, base_url, selected_model, encoded_images)
+                display_response(response)
 
-        # Here's the modified section
-        with st.chat_message("assistant"):  
-            message_placeholder = st.empty()
-            full_response = ""
+def display_response(response_generator):
+    full_response = ""
+    for response_chunk in response_generator:
+        if 'response' in response_chunk:
+            assistant_response = response_chunk['response']
+            typing_speed = 0.03 if chat_option == "Slow Typing Mode" else 0.008
+            for char in assistant_response:
+                full_response += char
+                time.sleep(typing_speed)
+                
+    message_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    
+
+# Function to manage and display continuous conversation with spinner
+def handle_conversation(messages):
+    with st.chat_message("assistant"):
+        with st.spinner('Chatting...'):
+            conversation_length = continuous_conversation(selected_model, base_url, messages)
+            st.success(f"Conversation ended with {conversation_length} exchanges.")
 
             # Pass the list of encoded images to the stream_response function
             for response_chunk in stream_response(prompt, base_url, selected_model, encoded_images):
@@ -108,4 +128,4 @@ def show_chat_interface():
                         message_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
 
             message_placeholder.markdown(full_response, unsafe_allow_html=True)
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
